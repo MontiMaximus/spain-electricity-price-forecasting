@@ -5,8 +5,10 @@ Forecasting the 24 hourly clearing prices of the Spanish day-ahead electricity m
 all 24 hours of day D+1 in a single shot, so this is not a rolling one-step-ahead problem
 — the whole next-day profile has to be predicted at once, from information available today.
 
-<!-- TODO: screenshot of the Streamlit app -->
-<!-- TODO: live demo link -->
+**[Live demo →](https://spain-electricity-price-forecasting.streamlit.app/)**
+
+
+![Dashboard](docs/screenshot.png)
 
 ## Results
 
