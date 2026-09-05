@@ -7,6 +7,14 @@ pass in the Forecast tab.
 
 Run with:  streamlit run app/app.py
 """
+import sys
+from pathlib import Path
+
+# Streamlit Cloud installs requirements.txt but not the local package, so the
+# project root has to be on sys.path before `import src` can resolve. Locally
+# `pip install -e .` already handles this; this line is what makes the two
+# environments behave the same.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import altair as alt
 import pandas as pd
@@ -14,6 +22,7 @@ import streamlit as st
 import xgboost as xgb
 
 from src.paths import DATA_PROCESSED, MODELS_DIR
+
 from src.features import TARGET
 from src.predict import forecast_next_day
 
@@ -22,7 +31,7 @@ PREDICTIONS = DATA_PROCESSED / "predictions.parquet"
 CV_METRICS  = DATA_PROCESSED / "cv_metrics.csv"
 MODEL_FILE  = MODELS_DIR / "xgboost_final.json"
 
-GITHUB_URL = "TODO"      # TODO: point this at the public repo
+GITHUB_URL = "https://github.com/MontiMaximus/spain-electricity-price-forecasting"
 
 st.set_page_config(page_title="Spanish day-ahead price forecasting", layout="wide")
 
