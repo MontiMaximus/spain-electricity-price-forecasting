@@ -1,140 +1,115 @@
 # Spanish day-ahead electricity price forecasting
-
-Forecasting the 24 hourly clearing prices of the Spanish day-ahead electricity market
-(OMIE, published through ENTSO-E): the auction closes at 12:00 CET on day D and clears
-all 24 hours of day D+1 in a single shot, so this is not a rolling one-step-ahead problem
-— the whole next-day profile has to be predicted at once, from information available today.
-
+ 
+Forecasting the 24 hourly clearing prices of the Spanish day-ahead electricity market (OMIE, published through ENTSO-E). The auction closes at 12:00 CET on day D and clears all 24 hours of day D+1 in a single shot, so the whole next-day profile has to be predicted at once, from information available today.
+ 
 **[Live demo →](https://spain-electricity-price-forecasting.streamlit.app/)**
-
-
+ 
 ![Dashboard](docs/screenshot.png)
-
+ 
 ## Results
+ 
+| Model                    | MAE (€/MWh) | MASE |
+|--------------------------|-------------|------|
+| ARIMA (non-seasonal)     | 37.21       | 1.89 |
+| Seasonal naive (weekly)  | 18.76       | 0.95 |
+| Seasonal naive (daily)   | 15.50       | 0.79 |
+| SARIMA (24h seasonality) | 14.46       | 0.74 |
+| **XGBoost**              | **12.58**   | **0.64** |
+ 
+**MAE** is the average error in euros per MWh. **MASE** puts that on a scale where 1.0 means
+"no better than copying yesterday's prices". `MASE = MAE of model / MAE of seasonal naive`
+ 
+The naive baselines are in the table on purpose: in this market, copying yesterday is already
+a strong forecast, because the daily price shape is stable. A model that cannot beat it is not
+adding anything.
+ 
+## Why the price behaves the way it does
+ 
+Electricity cannot be stored at scale, so it has to be generated at almost the exact moment it
+is consumed. That constraint is why the price is set by a daily auction rather than by inventory.
+ 
+Generators bid the minimum price they will accept for each hour, roughly the cost of producing
+one more MWh: near zero for wind and solar, high for gas, which has to pay for fuel and CO₂ allowances. OMIE sorts every bid from cheapest to most expensive, the **merit order**, and accepts them in that order until demand is covered. The price of the *last* bid needed becomes the price paid to **every** accepted generator, cheap ones included, called **marginal price**.
+ 
+That single rule explains most of what makes this series hard:
+ 
+- A windy day is cheap not because wind is cheap, but because high renewable output pushes gas out of the merit order entirely.
+- **Prices go negative.** When renewables generation exceeds demand, the marginal bid comes from a producer willing to pay to stay online rather than shut down and restart. The floor across coupled European markets is currently −600 €/MWh, and Spain gets there often: 4.4% of hours since October 2022, 12.8% of 2026 so far, over 30% in May 2025.
+- **The series is spiky and asymmetric.** The supply curve is nearly flat where renewables and nuclear sit, then turns steeply upward. A small change in demand or wind moves the price a long way, or not at all. Because prices cross zero regularly, percentage-based error metrics are undefined or misleading. Errors here are reported in euros per MWh.
+ 
+## How the models were tested
+ 
+- **10 delivery days**, 5–14 August 2026, each scored as a complete day. The day is the unit of evaluation because that is what the auction produces.
+- **Training always stops before the day being predicted.**
+- **Nothing is tuned on the test days.** Test data is used once, to report.
+  
+Two caveats worth mentioning:
+ 
+XGBoost is refit on the full four-year history for each day. SARIMA only uses the last 60 days, and its structure is estimated once and reused, because refitting it repeatedly on four years of hourly data is too slow to be practical. The table compares how each model would realistically be deployed, not the two model families given identical data.
+ 
+All 10 test days are consecutive days in August: high solar, high cooling demand. The numbers should not be assumed to hold in winter.
+ 
+## Where the model underperforms 
 
-| Model                     | MAE (€/MWh) | MASE |
-|---------------------------|-------------|------|
-| ARIMA (non-seasonal)      | 37.21       | 1.89 |
-| Seasonal Naive (weekly)   | 18.76       | 0.95 |
-| Seasonal Naive (daily)    | 15.50       | 0.79 |
-| SARIMA (24h seasonality)  | 14.46       | 0.74 |
-| **XGBoost**               | **12.58**   | **0.64** |
+XGBoost does not convincingly beat SARIMA yet. It reports a lower MAE, but the two are not trained on the same amount of history (60 days versus the full four years), the backtest is only 10 delivery days, and the confidence interval around a difference that size is wider than the difference itself. 
 
-MAE is averaged over the 10 delivery days, read from `data/processed/cv_metrics.csv`. The
-delivery day is the unit of evaluation because the auction clears 24 hours at once. Every
-window holds exactly 24 hours, so pooling all 240 gives the identical MAE — the choice of
-aggregation only moves RMSE, which is not linear in the errors. RMSE keeps the same
-ranking: 45.77, 24.11, 20.74, 19.36 and 16.52 in table order, averaged the same way.
+The working hypothesis is that without exogenous inputs, wind, solar and demand forecasts, which are the physical drivers of Spanish prices, a tree model on calendar features and own-price lags can only approximate a smoothed seasonal naive. Feature importance is consistent with this: `lag_24h` alone carries roughly half the gain. Adding ENTSO-E generation and load forecasts is the next step, and it is the change most likely to produce a real improvement rather than a nicer-looking number.
+ 
+## Guarding against data leakage
+ 
+Leakage, letting the model see information it would not have had in reality, is the main way
+forecasting results become fiction. How it is handled:
+ 
+- **Every price-based feature is shifted by at least 24 hours** (`lag_24h`, `lag_48h`, `lag_168h`, and a 7-day rolling mean). Hour 23 of tomorrow clears at the same instant as hour 00, so anything shorter would use a price that does not exist yet at auction time.
+- **Splits are always chronological.** Each test day is predicted by a model trained only on earlier data.
+- **The hourly timeline is made explicit before any shift is applied**, so a missing timestamp cannot silently push every lag out of alignment.
 
-**Cross-validation protocol.** Horizon `h = 24`, one full delivery day per window, 10
-non-overlapping windows (2026-08-05 to 2026-08-14). Every window trains only on data
-strictly before its delivery day. MASE divides a model's MAE by the MAE of a seasonal-naive
-(24h) forecast over the history strictly before the first test day — that denominator, not
-a package default, is what the MASE column is scaled by.
-
-**Not an equal-data comparison.** XGBoost is refit on the full history at every fold;
-SARIMA sees only the last 60 days and, with `refit=False`, has its orders and coefficients
-estimated once and held fixed across the windows, because fitting AutoARIMA on four years
-is computationally impractical. The table compares realistic deployments of each model
-class, not the classes at equal data.
-
-**One seasonal regime.** The 10 test days are consecutive days in August 2026 — high solar,
-high cooling demand. These results do not generalise to winter.
-
-## Why MAE and not MAPE
-
-Spanish prices go negative. 4.4% of all hours since October 2022 clear below zero, 12.8%
-of 2026 so far, and over 30% in the worst month (May 2025), with zero itself appearing
-regularly. MAPE divides by the actual value, so it is undefined at zero and explodes near
-it; it would also reward a model for being wrong on cheap hours. MAE is in EUR/MWh, which
-is the unit the error actually costs, and MASE puts that on a scale where 1.0 means "no
-better than copying yesterday".
-
-## Leakage audit
-
-- **Every price-derived feature is shifted by at least 24 hours.** The auction clears
-  hour 23 of D+1 at the same moment as hour 00, so a lag shorter than 24h would use a
-  price that does not exist yet at gate closure. `lag_24h`, `lag_48h`, `lag_168h` and the
-  7-day rolling mean are all built on `shift(24)` or longer.
-- **Splits are chronological, never random.** Every CV window trains strictly before its
-  delivery day. A shuffled split on a time series leaks the future into the past.
-- **Nothing is tuned against the test windows.** The booster runs a fixed 600 trees with
-  no early stopping, so there is no stopping rule that could peek at the delivery day; if
-  early stopping is added later it has to be scored on a validation slice carved out of
-  the training window, never on the test day. Test data is touched once, to report.
-- The hourly grid is made explicit with `asfreq("h")` before any shift, because `.shift()`
-  counts positions, not clock time: a missing timestamp would silently misalign every lag
-  after it.
-
-## Where the model underperforms
-
-XGBoost does not convincingly beat SARIMA yet. It reports a lower MAE, but the two are not
-trained on the same amount of history (60 days versus the full four years), the backtest is
-only 10 delivery days, and the confidence interval around a difference that size is wider
-than the difference itself.
-
-The working hypothesis is that without exogenous inputs — wind, solar and demand forecasts,
-which are the physical drivers of Spanish prices — a tree model on calendar features and
-own-price lags can only approximate a smoothed seasonal naive. Feature importance is
-consistent with this: `lag_24h` alone carries roughly half the gain. Adding ENTSO-E
-generation and load forecasts is the next step, and it is the change most likely to
-produce a real improvement rather than a nicer-looking number.
-
+  
 ## Limitations
+ 
+- Prices are stored in Madrid local time. The October changeover creates a duplicated 02:00 (dropped) and the March one creates a gap (left as missing). Lag alignment still holds, but those days genuinely have 23 or 25 hours and are not flagged.
+- **10 test days is a small sample**, limited by how long the SARIMA fits take.
+- **No weather or demand inputs yet.** See the section above.
+- **The dataset is frozen at 2026-08-14** so results stay reproducible. The dashboard reads that
+  snapshot; there is no live data feed yet.
 
-- **DST handling.** Notebook 01 converts the UTC index to `Europe/Madrid` and then drops
-  the timezone, so the CSV is naive Madrid local time. The October changeover produces a
-  duplicated 02:00, which is dropped (4 rows across the dataset); the March changeover
-  produces a gap, which `.asfreq("h")` fills with NaN (4 rows: 2023-03-26, 2024-03-31,
-  2025-03-30 and 2026-03-29, all at 02:00). Because shifts count positions on that
-  explicit grid, lag alignment holds either way, but the affected days carry 23 or 25 real
-  hours and are not flagged as such.
-- **10 backtest days is a small sample**, chosen against AutoARIMA's fitting cost.
-- **No exogenous variables.** See the section above.
-- **The dataset is frozen** at 2026-08-14 on purpose, so that training and evaluation stay
-  reproducible. The app reads that frozen snapshot; there is no live ENTSO-E call yet.
-
+  
 ## Repo map
-
+ 
 ```
-notebooks/01_spain_hourly_dataset.ipynb   ENTSO-E extraction, parsing, cleaning
+notebooks/01_spain_hourly_dataset.ipynb   ENTSO-E download, parsing, cleaning
 notebooks/02_EDA.ipynb                    exploratory analysis
-notebooks/03_baseline_models.ipynb        Naive / Seasonal Naive / ARIMA / SARIMA
+notebooks/03_baseline_models.ipynb        naive / seasonal naive / ARIMA / SARIMA
 notebooks/04_xgboost.ipynb                features, cross-validation, final model
-src/paths.py                              project paths, so nothing is relative
+src/paths.py                              project paths
 src/features.py                           feature engineering (mirrors notebook 04)
-src/predict.py                            D+1 inference
-app/app.py                                Streamlit dashboard over the frozen artifacts
-data/raw/                                 untouched ENTSO-E XML (not committed)
-data/processed/                           hourly price CSV, CV predictions, CV metrics
-models/                                   the fitted XGBoost booster
+src/predict.py                            next-day inference
+app/app.py                                Streamlit dashboard
+data/raw/                                 raw ENTSO-E files (not committed)
+data/processed/                           hourly prices, CV predictions, CV metrics
+models/                                   the trained XGBoost model
 ```
-
-The notebooks are self-contained: they define their feature code inline instead of
-importing `src/`. The duplication is deliberate — a notebook should read top to bottom
-without jumping to another file — and `src/features.py` carries a note saying that a
-change to a feature has to be made in both places.
-
+ 
+The notebooks deliberately repeat the feature code instead of importing `src/`, so each one reads top to bottom without jumping between files. `src/features.py` carries a note reminding that a change to a feature has to be made in both places.
+ 
 ## Setup
-
+ 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate           # Windows;  source .venv/bin/activate on Linux/macOS
 pip install -r requirements.txt
-pip install -e .                 # makes `from src... import ...` work everywhere
-
+pip install -e .
+ 
 copy .env.example .env           # then paste your ENTSO-E token into it
 streamlit run app/app.py
 ```
-
-Only notebook 01 needs the API token; everything else reads `data/processed/`.
-
+ 
+Only notebook 01 needs the API token; everything else reads from `data/processed/`.
+ 
 ## Data source
-
-[ENTSO-E Transparency Platform](https://transparency.entsoe.eu/), day-ahead prices
-(`documentType=A44`) for the Spanish bidding zone (`10YES-REE------0`), from 2022-10-01.
-
-Spain moved to 15-minute market time units in October 2025, so the series has two eras:
-hourly (`PT60M`) until 2025-09-30 and quarter-hourly (`PT15M`) afterwards. Notebook 01
-mean-aggregates the four quarters of each hour, which reproduces the official 60-minute
-index, so the target stays "the hourly day-ahead price" across the whole period.
+ 
+[ENTSO-E Transparency Platform](https://transparency.entsoe.eu/), day-ahead prices for the Spanish bidding zone, from 2022-10-01 onwards.
+ 
+Spain switched from hourly to 15-minute market intervals in October 2025, so the raw data comes
+in two formats. Notebook 01 averages the four quarters of each hour, which reproduces the official hourly price, so the target stays consistent across the whole period.
+ 
